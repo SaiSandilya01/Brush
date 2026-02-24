@@ -12,7 +12,7 @@ struct BrushApp: App {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem?
     var overlayWindow: OverlayWindow?
     var controlPanelWindow: NSWindow?
@@ -24,6 +24,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // Global hotkey state tracking
     private var globalMonitor: Any?
     private var pressedKeys = Set<String>()
+    // Debounce timer for orientation snap
+    private var snapTimer: Timer?
+    
+    // Toolbar size constants (must match PanelLayout in ControlPanelView)
+    private let hW: CGFloat = 730, hH: CGFloat = 54    // horizontal
+    private let vW: CGFloat = 90,  vH: CGFloat = 480   // vertical (80 content + 10 grip+padding)
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
@@ -35,26 +41,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func setupGlobalHotkey() {
-        // Monitor key events globally (works even when another app is focused)
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self else { return }
-            // Require Command modifier
-            guard event.modifierFlags.contains(.command) else { return }
+        // Global monitor fires even when another app is active.
+        // Requires Input Monitoring permission on first run.
+        let keyActions: [String: () -> Void] = [
+            "b": { [weak self] in self?.toggleControlPanel() },     // Ctrl+Shift+B – Control Panel
+            "d": { [weak self] in self?.toggleDrawingMode() },      // Ctrl+Shift+D – Drawing Mode
+            "h": { [weak self] in self?.toggleVisibility() },       // Ctrl+Shift+H – Hide/Show
+            "x": { [weak self] in self?.clearScreen() },            // Ctrl+Shift+X – Clear
+            "q": { NSApp.terminate(nil) },                          // Ctrl+Shift+Q – Quit
+        ]
+        
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+            let mods = event.modifierFlags
+            // Must have EXACTLY Ctrl+Shift (no Cmd, no Option)
+            guard mods.contains(.control) && mods.contains(.shift) else { return }
+            guard !mods.contains(.command) && !mods.contains(.option) else { return }
             
             let char = event.charactersIgnoringModifiers?.lowercased() ?? ""
-            self.pressedKeys.insert(char)
-            
-            // Cmd + B + H: both 'b' and 'h' held with Command
-            if self.pressedKeys.contains("b") && self.pressedKeys.contains("h") {
-                self.pressedKeys.removeAll()
-                DispatchQueue.main.async { self.toggleControlPanel() }
+            if let action = keyActions[char] {
+                DispatchQueue.main.async { action() }
             }
         }
-        
-        // Clear tracked keys on key up so stale state doesn't accumulate
-        NSEvent.addGlobalMonitorForEvents(matching: .keyUp) { [weak self] event in
-            let char = event.charactersIgnoringModifiers?.lowercased() ?? ""
-            self?.pressedKeys.remove(char)
+    }
+    
+    @objc func toggleDrawingMode() {
+        appState.isDrawingMode.toggle()
+        overlayWindow?.setDrawingMode(appState.isDrawingMode)
+        if appState.isDrawingMode {
+            overlayWindow?.orderFrontRegardless()
         }
     }
     
@@ -63,41 +77,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(monitor)
         }
     }
-    
+
     @objc func onToggleDrawingMode(_ notification: Notification) {
         if let userInfo = notification.userInfo, let enabled = userInfo["enabled"] as? Bool {
             overlayWindow?.setDrawingMode(enabled)
-            if enabled {
-                overlayWindow?.orderFrontRegardless()
-            }
+            if enabled { overlayWindow?.orderFrontRegardless() }
         }
     }
     
     func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "paintbrush", accessibilityDescription: "Brush")
         }
         
         let menu = NSMenu()
         
-        menu.addItem(NSMenuItem(title: "Control Panel", action: #selector(toggleControlPanel), keyEquivalent: "p"))
-        menu.addItem(NSMenuItem(title: "Show/Hide Drawings", action: #selector(toggleVisibility), keyEquivalent: "h"))
-        menu.addItem(NSMenuItem(title: "Take Screenshot", action: #selector(takeScreenshot), keyEquivalent: "s"))
-        menu.addItem(NSMenuItem(title: "Clear Screen", action: #selector(clearScreen), keyEquivalent: "c"))
+        // Helper to add items with Ctrl+Shift modifiers shown in the menu
+        func addHotkeyItem(title: String, action: Selector, key: String) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key.lowercased())
+            item.keyEquivalentModifierMask = [.control, .shift]
+            menu.addItem(item)
+        }
+        
+        addHotkeyItem(title: "Control Panel",       action: #selector(toggleControlPanel), key: "b")
+        addHotkeyItem(title: "Toggle Drawing Mode", action: #selector(toggleDrawingMode),  key: "d")
+        addHotkeyItem(title: "Show/Hide Drawings",  action: #selector(toggleVisibility),   key: "h")
+        addHotkeyItem(title: "Clear All Drawings",  action: #selector(clearScreen),        key: "x")
+        addHotkeyItem(title: "Take Screenshot",     action: #selector(takeScreenshot),     key: "s")
         
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Undo", action: #selector(undoAction), keyEquivalent: "z"))
-        let redoItem = NSMenuItem(title: "Redo", action: #selector(redoAction), keyEquivalent: "z")
-        redoItem.keyEquivalentModifierMask = [.command, .shift]
-        menu.addItem(redoItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit Brush", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "e"))
+        addHotkeyItem(title: "Quit Brush",          action: #selector(quitApp),            key: "q")
         
         statusItem?.menu = menu
     }
+    
+    @objc func quitApp() { NSApp.terminate(nil) }
+
     
     func setupOverlayWindow() {
         let drawingView = DrawingView(appState: appState)
@@ -115,34 +131,127 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func setupControlPanel() {
         let controlView = ControlPanelView(appState: appState)
         let hostingView = NSHostingView(rootView: controlView)
-        controlPanelHostingView = hostingView  // strong reference prevents deallocation
+        controlPanelHostingView = hostingView
+        
+        let screen = NSScreen.main?.frame ?? NSRect.zero
+        
+        // Horizontal bar: content-sized width, 44pt tall, centered at the top
+        let panelHeight: CGFloat = 44
+        let panelWidth: CGFloat = 730
+        let panelRect = NSRect(
+            x: screen.midX - panelWidth / 2,
+            y: screen.maxY - panelHeight - 6,
+            width: panelWidth,
+            height: panelHeight
+        )
         
         let window = NSWindow(
-            contentRect: NSRect(x: 100, y: 100, width: 250, height: 350),
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            contentRect: panelRect,
+            styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         
-        window.center()
         window.level = NSWindow.Level(Int(CGWindowLevelForKey(.screenSaverWindow)) + 1)
-        window.isReleasedWhenClosed = false  // prevents crash when user clicks the ✕ button
-        window.title = "Brush Controls"
-        window.contentView = hostingView
+        window.isReleasedWhenClosed = false
+        window.isMovable = true
+        window.isMovableByWindowBackground = true  // drag by clicking empty areas
         window.backgroundColor = .clear
-        window.setFrameAutosaveName("BrushControlPanel")
+        window.isOpaque = false
+        window.hasShadow = true
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.contentView = hostingView
+        window.delegate = self   // enables windowDidMove
         
         self.controlPanelWindow = window
-        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
     
     @objc func toggleControlPanel() {
         if let window = controlPanelWindow {
-            if window.isVisible {
-                window.orderOut(nil)
-            } else {
-                window.makeKeyAndOrderFront(nil)
+            if window.isVisible { window.orderOut(nil) }
+            else { window.orderFrontRegardless() }
+        }
+    }
+    
+    // MARK: – NSWindowDelegate: orientation snap
+    
+    func windowDidMove(_ notification: Notification) {
+        snapTimer?.invalidate()
+        snapTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
+            self?.checkAndSnapOrientation()
+        }
+    }
+    
+    private func checkAndSnapOrientation() {
+        guard let window = controlPanelWindow,
+              let screen = NSScreen.main else { return }
+        
+        let screenW = screen.frame.width
+        let midX = window.frame.midX
+        let threshold = screenW * 0.20   // within 20% of either edge → vertical
+        
+        let newOrientation: BarOrientation
+        if midX < threshold {
+            newOrientation = .verticalLeft
+        } else if midX > screenW - threshold {
+            newOrientation = .verticalRight
+        } else {
+            newOrientation = .horizontal
+        }
+        
+        guard newOrientation != appState.barOrientation else {
+            // Same orientation — just make sure window is inside screen bounds
+            clampToScreen(window: window, screen: screen.frame)
+            return
+        }
+        appState.barOrientation = newOrientation
+        snapWindow(to: newOrientation, screen: screen.frame, window: window)
+    }
+    
+    private func clampToScreen(window: NSWindow, screen: NSRect) {
+        var f = window.frame
+        f.origin.x = max(screen.minX, min(f.origin.x, screen.maxX - f.width))
+        f.origin.y = max(screen.minY, min(f.origin.y, screen.maxY - f.height))
+        if f.origin != window.frame.origin {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.15
+                window.animator().setFrame(f, display: true)
             }
+        }
+    }
+    
+    private func snapWindow(to orientation: BarOrientation, screen: NSRect, window: NSWindow) {
+        let currentMid = window.frame.midY
+        let newFrame: NSRect
+        
+        switch orientation {
+        case .horizontal:
+            // Re-center horizontally, keep vertical position
+            newFrame = NSRect(
+                x: screen.midX - hW / 2,
+                y: min(max(currentMid - hH / 2, screen.minY), screen.maxY - hH),
+                width: hW, height: hH
+            )
+        case .verticalLeft:
+            // Dock to the left edge, keep vertical center
+            newFrame = NSRect(
+                x: screen.minX,
+                y: min(max(currentMid - vH / 2, screen.minY), screen.maxY - vH),
+                width: vW, height: vH
+            )
+        case .verticalRight:
+            // Dock to the right edge, keep vertical center
+            newFrame = NSRect(
+                x: screen.maxX - vW,
+                y: min(max(currentMid - vH / 2, screen.minY), screen.maxY - vH),
+                width: vW, height: vH
+            )
+        }
+        
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            window.animator().setFrame(newFrame, display: true)
         }
     }
     

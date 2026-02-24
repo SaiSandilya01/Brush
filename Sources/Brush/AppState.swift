@@ -7,8 +7,13 @@ enum ToolType: String, CaseIterable, Identifiable {
     case rectangle = "Rectangle"
     case circle = "Circle"
     case select = "Select"
-    
     var id: String { self.rawValue }
+}
+
+enum BarOrientation {
+    case horizontal
+    case verticalLeft   // bar moved to left side of screen, grip on right
+    case verticalRight  // bar moved to right side of screen, grip on left
 }
 
 /// Maximum number of strokes kept in memory before oldest are dropped.
@@ -69,6 +74,7 @@ class AppState: ObservableObject {
     // MARK: - App State
     @Published var isHidden: Bool = false
     @Published var isDrawingMode: Bool = false
+    @Published var barOrientation: BarOrientation = .horizontal
     
     // MARK: - Mutations
     
