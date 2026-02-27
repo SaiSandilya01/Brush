@@ -8,6 +8,7 @@ private struct PanelLayout {
     static let gripThickness: CGFloat  = 4
     static let gripLength: CGFloat     = hBarWidth / 3
     static let gripSideLength: CGFloat = 480 / 3
+    static let cornerRadius: CGFloat   = 22
 }
 
 struct ControlPanelView: View {
@@ -27,6 +28,7 @@ struct ControlPanelView: View {
             }
         }
         .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: PanelLayout.cornerRadius, style: .continuous))
     }
     
     // MARK: – Horizontal layout
@@ -164,7 +166,7 @@ struct ControlPanelView: View {
             ToolBtn(icon: "circle",             tip: "Circle",    tool: .circle,    state: appState)
             ToolBtn(icon: "cursorarrow",        tip: "Select",    tool: .select,    state: appState)
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
         .padding(.horizontal, 4)
     }
     
@@ -174,20 +176,18 @@ struct ControlPanelView: View {
                 colorCircle(color)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
         .padding(.horizontal, 10)
     }
     
     private var sizeSectionV: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "circle.fill").font(.system(size: 5)).foregroundStyle(.tertiary)
-            Slider(value: $appState.selectedLineWidth, in: 2...20)
-                .rotationEffect(.degrees(-90))
-                .frame(width: 34, height: 80)
-                .clipped()
+        VStack(spacing: 4) {
             Image(systemName: "circle.fill").font(.system(size: 13)).foregroundStyle(.tertiary)
+            VerticalSlider(value: $appState.selectedLineWidth, range: 2...20)
+                .frame(width: 28, height: 70)
+            Image(systemName: "circle.fill").font(.system(size: 5)).foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
     }
     
     private var actionSectionV: some View {
@@ -213,7 +213,7 @@ struct ControlPanelView: View {
                 appState.clear()
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
     }
     
     private var hDivider: some View {
@@ -235,6 +235,68 @@ struct ControlPanelView: View {
     }
 }
 
+// MARK: – Window-drag blocker
+
+/// Wrapping a SwiftUI view in this as a .background() prevents AppKit from
+/// treating mouse-down events in that region as window-drag initiators.
+private struct NonDraggableBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> _NonDraggableView { _NonDraggableView() }
+    func updateNSView(_ nsView: _NonDraggableView, context: Context) {}
+}
+
+class _NonDraggableView: NSView {
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
+// MARK: – Vertical Slider
+
+struct VerticalSlider: View {
+    @Binding var value: CGFloat
+    let range: ClosedRange<CGFloat>
+
+    var body: some View {
+        GeometryReader { geo in
+            let trackH = geo.size.height
+            let fraction = (value - range.lowerBound) / (range.upperBound - range.lowerBound)
+            // Thumb offset (0 = top → max, 1 = bottom → min)
+            let thumbY = trackH * (1 - fraction)
+
+            ZStack(alignment: .top) {
+                // Track
+                Capsule()
+                    .fill(Color.primary.opacity(0.12))
+                    .frame(width: 4)
+                    .frame(maxWidth: .infinity)
+
+                // Fill above thumb
+                Capsule()
+                    .fill(Color.accentColor.opacity(0.7))
+                    .frame(width: 4, height: max(0, trackH - thumbY))
+                    .frame(maxWidth: .infinity)
+                    .offset(y: thumbY)
+
+                // Thumb
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 14, height: 14)
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+                    .offset(y: thumbY - 7)
+                    .frame(maxWidth: .infinity)
+            }
+            .background(NonDraggableBackground())
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        let newFraction = 1 - (drag.location.y / trackH)
+                        let clamped = min(1, max(0, newFraction))
+                        value = range.lowerBound + clamped * (range.upperBound - range.lowerBound)
+                    }
+            )
+        }
+    }
+}
+
 // MARK: – Reusable Atoms
 
 struct ToolBtn: View {
@@ -245,7 +307,7 @@ struct ToolBtn: View {
                 .frame(width: 30, height: 30).contentShape(Rectangle())
                 .background(state.selectedTool == tool ? Color.accentColor : .clear)
                 .foregroundColor(state.selectedTool == tool ? .white : .primary)
-                .cornerRadius(7)
+                .cornerRadius(10)
         }.buttonStyle(.plain).help(tip)
     }
 }
@@ -260,7 +322,7 @@ struct ActionBtn: View {
                 .frame(width: 30, height: 30).contentShape(Rectangle())
                 .foregroundColor(active ? .white : (disabled ? .secondary : tint))
                 .background(active ? tint : .clear)
-                .cornerRadius(7)
+                .cornerRadius(10)
         }.buttonStyle(.plain).disabled(disabled).help(tip)
     }
 }
