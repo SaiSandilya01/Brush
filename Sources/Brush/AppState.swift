@@ -6,6 +6,9 @@ enum ToolType: String, CaseIterable, Identifiable {
     case pencil = "Pencil"
     case rectangle = "Rectangle"
     case circle = "Circle"
+    case arrowSingle = "Arrow"
+    case arrowDouble = "Double Arrow"
+    case text = "Text"
     case select = "Select"
     var id: String { self.rawValue }
 }
@@ -26,6 +29,11 @@ struct DrawingPath: Identifiable {
     var lineWidth: CGFloat
     var toolType: ToolType
     var isFilled: Bool = false
+    
+    /// Text content (only used when toolType == .text)
+    var text: String? = nil
+    /// Font size for text tool (derived from lineWidth at commit time)
+    var fontSize: CGFloat = 24
     
     /// Cached smooth Path for rendering. Rebuilt only when committed.
     var cachedPath: Path? = nil
@@ -60,7 +68,8 @@ class AppState: ObservableObject {
     // doesn't have to manually toggle it for selection to work.
     @Published var selectedTool: ToolType = .pencil {
         didSet {
-            if selectedTool == .select && !isDrawingMode {
+            let needsDrawing = selectedTool == .select || selectedTool == .text
+            if needsDrawing && !isDrawingMode {
                 isDrawingMode = true
                 NotificationCenter.default.post(
                     name: NSNotification.Name("ToggleDrawingMode"),
@@ -131,10 +140,14 @@ class AppState: ObservableObject {
         redoStack.removeAll()
     }
     
-    /// Builds a smooth Catmull-Rom spline Path. Called once on commit, result is cached.
+    /// Builds a smooth path from a DrawingPath. Text tool returns empty path (rendered separately).
     func buildSmoothedPath(from drawingPath: DrawingPath) -> Path {
         let points = drawingPath.points
         var path = Path()
+        
+        // Text uses a separate rendering pass — no path needed
+        if drawingPath.toolType == .text { return path }
+        
         guard points.count > 1 else {
             if let p = points.first { path.move(to: p) }
             return path
@@ -169,9 +182,82 @@ class AppState: ObservableObject {
                     width: abs(first.x - last.x), height: abs(first.y - last.y)
                 ))
             }
+        case .arrowSingle:
+            if let first = points.first, let last = points.last {
+                path = buildArrowPath(from: first, to: last,
+                                      lineWidth: drawingPath.lineWidth, doubleEnded: false)
+            }
+        case .arrowDouble:
+            if let first = points.first, let last = points.last {
+                path = buildArrowPath(from: first, to: last,
+                                      lineWidth: drawingPath.lineWidth, doubleEnded: true)
+            }
+        case .text:
+            break // rendered via NSAttributedString, not a Path
         case .select:
             break
         }
         return path
     }
+}
+
+// MARK: - Arrow Path Geometry
+
+/// Builds a Path for a single- or double-ended arrow.
+/// The path contains the shaft line plus filled arrowhead triangle(s).
+func buildArrowPath(from start: CGPoint, to end: CGPoint,
+                    lineWidth: CGFloat, doubleEnded: Bool) -> Path {
+    var path = Path()
+    let dx = end.x - start.x
+    let dy = end.y - start.y
+    let length = hypot(dx, dy)
+    guard length > 1 else { return path }
+
+    // Unit vector along the shaft
+    let ux = dx / length
+    let uy = dy / length
+    // Perpendicular unit vector
+    let px = -uy
+    let py = ux
+
+    let headLength = max(14.0, lineWidth * 4.0)
+    let headWidth  = headLength * 0.55
+
+    // --- Forward arrowhead (at `end`) ---
+    // Shaft stops just before the arrowhead base
+    let shaftEndForward = CGPoint(x: end.x - ux * headLength,
+                                  y: end.y - uy * headLength)
+    let shaftStartPoint = doubleEnded
+        ? CGPoint(x: start.x + ux * headLength, y: start.y + uy * headLength)
+        : start
+
+    // Shaft
+    path.move(to: shaftStartPoint)
+    path.addLine(to: shaftEndForward)
+
+    // Forward arrowhead triangle
+    let fLeft  = CGPoint(x: shaftEndForward.x + px * headWidth / 2,
+                         y: shaftEndForward.y + py * headWidth / 2)
+    let fRight = CGPoint(x: shaftEndForward.x - px * headWidth / 2,
+                         y: shaftEndForward.y - py * headWidth / 2)
+    path.move(to: end)
+    path.addLine(to: fLeft)
+    path.addLine(to: fRight)
+    path.closeSubpath()
+
+    if doubleEnded {
+        // Backward arrowhead triangle (at `start`, pointing away from `end`)
+        let shaftEndBack = CGPoint(x: start.x + ux * headLength,
+                                   y: start.y + uy * headLength)
+        let bLeft  = CGPoint(x: shaftEndBack.x + px * headWidth / 2,
+                             y: shaftEndBack.y + py * headWidth / 2)
+        let bRight = CGPoint(x: shaftEndBack.x - px * headWidth / 2,
+                             y: shaftEndBack.y - py * headWidth / 2)
+        path.move(to: start)
+        path.addLine(to: bLeft)
+        path.addLine(to: bRight)
+        path.closeSubpath()
+    }
+
+    return path
 }

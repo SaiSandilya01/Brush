@@ -20,6 +20,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var overlayHostingView: NSHostingView<DrawingView>?
     var controlPanelHostingView: NSHostingView<ControlPanelView>?
     var appState = AppState()
+    var textInputPanel: TextInputPanel?
     
     // Global hotkey state tracking
     private var globalMonitor: Any?
@@ -28,7 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var snapTimer: Timer?
     
     // Toolbar size constants (must match PanelLayout in ControlPanelView)
-    private let hW: CGFloat = 730, hH: CGFloat = 54    // horizontal
+    private let hW: CGFloat = 832, hH: CGFloat = 54    // horizontal
     private let vW: CGFloat = 90,  vH: CGFloat = 480   // vertical (80 content + 10 grip+padding)
     
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -36,8 +37,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupOverlayWindow()
         setupControlPanel()
         setupGlobalHotkey()
+        registerVirgilFont()
         
         NotificationCenter.default.addObserver(self, selector: #selector(onToggleDrawingMode(_:)), name: NSNotification.Name("ToggleDrawingMode"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(onRequestTextInput(_:)), name: NSNotification.Name("RequestTextInput"), object: nil)
+    }
+    
+    private func registerVirgilFont() {
+        guard let url = Bundle.module.url(forResource: "Resources/Virgil", withExtension: "ttf") else {
+            print("[Brush] Virgil.ttf not found in bundle")
+            return
+        }
+        CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
     }
     
     func setupGlobalHotkey() {
@@ -83,6 +94,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             overlayWindow?.setDrawingMode(enabled)
             if enabled { overlayWindow?.orderFrontRegardless() }
         }
+    }
+    
+    @objc func onRequestTextInput(_ notification: Notification) {
+        guard let info = notification.userInfo,
+              let x = info["x"] as? CGFloat,
+              let y = info["y"] as? CGFloat,
+              let color = info["color"] as? Color,
+              let fontSize = info["fontSize"] as? CGFloat,
+              let lineWidth = info["lineWidth"] as? CGFloat,
+              let screen = NSScreen.main else { return }
+        
+        // Convert SwiftUI top-down coordinates to macOS bottom-up screen coords
+        let screenY = screen.frame.height - y
+        let screenPt = CGPoint(x: x, y: screenY)
+        
+        // Pause overlay mouse capture so it doesn't fight the text panel
+        overlayWindow?.ignoresMouseEvents = true
+        
+        let panel = TextInputPanel(
+            at: screenPt,
+            color: NSColor(color),
+            fontSize: fontSize
+        ) { [weak self] text in
+            guard let self = self else { return }
+            // Re-enable overlay mouse events
+            self.overlayWindow?.setDrawingMode(self.appState.isDrawingMode)
+            self.appState.currentPath = nil
+            
+            guard let text = text,
+                  !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+            
+            let dp = DrawingPath(
+                points: [CGPoint(x: x, y: y)],
+                color: color,
+                lineWidth: lineWidth,
+                toolType: .text,
+                text: text,
+                fontSize: fontSize
+            )
+            self.appState.commitPath(dp)
+        }
+        self.textInputPanel = panel
+        panel.show()
     }
     
     func setupMenuBar() {
@@ -292,3 +346,133 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         task.waitUntilExit()
     }
 }
+
+// MARK: - Text Input Panel
+
+/// A small key-window NSPanel that hosts an NSTextField for text tool input.
+/// Unlike the OverlayWindow (canBecomeKey = false), this panel CAN become key
+/// so the user can actually type into it.
+class TextInputPanel: NSObject, NSTextFieldDelegate {
+    private var panel: NSPanel?
+    private let onCommit: (String?) -> Void
+    private var textField: NSTextField?
+    private var committed = false
+    private var clickMonitor: Any?
+
+    init(at screenPoint: CGPoint, color: NSColor, fontSize: CGFloat,
+         onCommit: @escaping (String?) -> Void) {
+        self.onCommit = onCommit
+        super.init()
+
+        let font = NSFont(name: "Virgil3YOFF", size: fontSize)
+            ?? NSFont.systemFont(ofSize: fontSize)
+        let fieldHeight = fontSize + 16
+        let panelW: CGFloat = 420
+
+        let panelRect = NSRect(
+            x: screenPoint.x,
+            y: screenPoint.y - fieldHeight,
+            width: panelW,
+            height: fieldHeight + 6
+        )
+
+        let p = _KeyablePanel(
+            contentRect: panelRect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        p.backgroundColor = .clear
+        p.isOpaque = false
+        p.hasShadow = false
+        p.level = NSWindow.Level(Int(CGWindowLevelForKey(.screenSaverWindow)) + 2)
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        let container = NSView(frame: NSRect(origin: .zero,
+                                             size: CGSize(width: panelW, height: fieldHeight + 6)))
+
+        // Subtle underline
+        let underline = NSView(frame: NSRect(x: 0, y: 0, width: panelW, height: 2))
+        underline.wantsLayer = true
+        underline.layer?.backgroundColor = color.withAlphaComponent(0.55).cgColor
+        container.addSubview(underline)
+
+        let tf = NSTextField(frame: NSRect(x: 0, y: 4, width: panelW, height: fieldHeight))
+        tf.font = font
+        tf.textColor = color
+        tf.backgroundColor = .clear
+        tf.isBezeled = false
+        tf.isBordered = false
+        tf.drawsBackground = false
+        tf.placeholderString = "Type text…"
+        tf.focusRingType = .none
+        tf.isEditable = true
+        tf.isSelectable = true
+        tf.delegate = self
+        tf.target = self
+        tf.action = #selector(enterPressed)
+        container.addSubview(tf)
+
+        p.contentView = container
+        self.panel = p
+        self.textField = tf
+    }
+
+    func show() {
+        guard let p = panel, let tf = textField else { return }
+        p.makeKeyAndOrderFront(nil)
+        p.makeFirstResponder(tf)
+        
+        // Commit when user clicks outside the panel (global monitor)
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
+            self?.commit()
+        }
+    }
+
+    @objc private func enterPressed() { commit() }
+
+    func commit() {
+        guard !committed else { return }
+        committed = true
+        removeClickMonitor()
+        let text = textField?.stringValue
+        dismiss()
+        onCommit(text)
+    }
+
+    private func discard() {
+        guard !committed else { return }
+        committed = true
+        removeClickMonitor()
+        dismiss()
+        onCommit(nil)
+    }
+
+    private func dismiss() {
+        panel?.orderOut(nil)
+        panel = nil
+    }
+
+    private func removeClickMonitor() {
+        if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
+    }
+
+    // NSTextFieldDelegate — handle Escape and Enter
+    func control(_ control: NSControl, textView: NSTextView,
+                 doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            discard(); return true
+        }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            commit(); return true
+        }
+        return false
+    }
+    // NOTE: controlTextDidEndEditing intentionally removed — it fired immediately
+    // on panel presentation before the field acquired focus, causing instant dismiss.
+}
+
+private class _KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+

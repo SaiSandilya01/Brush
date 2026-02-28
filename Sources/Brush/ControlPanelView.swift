@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: – Layout Constants
 private struct PanelLayout {
     static let barThickness: CGFloat   = 44
-    static let hBarWidth: CGFloat      = 730
+    static let hBarWidth: CGFloat      = 832
     static let vBarWidth: CGFloat      = 80    // wider so 2-col grids fit
     static let gripThickness: CGFloat  = 4
     static let gripLength: CGFloat     = hBarWidth / 3
@@ -99,10 +99,13 @@ struct ControlPanelView: View {
     
     private var toolSection: some View {
         HStack(spacing: 2) {
-            ToolBtn(icon: "paintbrush.pointed", tip: "Pencil",    tool: .pencil,    state: appState)
-            ToolBtn(icon: "square",             tip: "Rectangle", tool: .rectangle, state: appState)
-            ToolBtn(icon: "circle",             tip: "Circle",    tool: .circle,    state: appState)
-            ToolBtn(icon: "cursorarrow",        tip: "Select",    tool: .select,    state: appState)
+            ToolBtn(icon: "paintbrush.pointed",     tip: "Pencil",        tool: .pencil,       state: appState)
+            ToolBtn(icon: "square",                 tip: "Rectangle",     tool: .rectangle,    state: appState)
+            ToolBtn(icon: "circle",                 tip: "Circle",        tool: .circle,       state: appState)
+            ToolBtn(icon: "arrow.right",            tip: "Arrow",         tool: .arrowSingle,  state: appState)
+            ToolBtn(icon: "arrow.left.and.right",   tip: "Double Arrow",  tool: .arrowDouble,  state: appState)
+            ToolBtn(icon: "textformat",       tip: "Text",          tool: .text,         state: appState)
+            ToolBtn(icon: "cursorarrow",            tip: "Select",        tool: .select,       state: appState)
         }
         .padding(.horizontal, 8)
     }
@@ -161,10 +164,13 @@ struct ControlPanelView: View {
     
     private var toolSectionV: some View {
         LazyVGrid(columns: [GridItem(.fixed(34)), GridItem(.fixed(34))], spacing: 4) {
-            ToolBtn(icon: "paintbrush.pointed", tip: "Pencil",    tool: .pencil,    state: appState)
-            ToolBtn(icon: "square",             tip: "Rectangle", tool: .rectangle, state: appState)
-            ToolBtn(icon: "circle",             tip: "Circle",    tool: .circle,    state: appState)
-            ToolBtn(icon: "cursorarrow",        tip: "Select",    tool: .select,    state: appState)
+            ToolBtn(icon: "paintbrush.pointed",   tip: "Pencil",       tool: .pencil,      state: appState)
+            ToolBtn(icon: "square",               tip: "Rectangle",    tool: .rectangle,   state: appState)
+            ToolBtn(icon: "circle",               tip: "Circle",       tool: .circle,      state: appState)
+            ToolBtn(icon: "arrow.right",          tip: "Arrow",        tool: .arrowSingle, state: appState)
+            ToolBtn(icon: "arrow.left.and.right", tip: "Double Arrow", tool: .arrowDouble, state: appState)
+            ToolBtn(icon: "textformat",     tip: "Text",         tool: .text,        state: appState)
+            ToolBtn(icon: "cursorarrow",          tip: "Select",       tool: .select,      state: appState)
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 4)

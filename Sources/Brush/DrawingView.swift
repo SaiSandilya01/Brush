@@ -72,12 +72,21 @@ struct DrawingView: View {
         ))
     }
     
+    // MARK: - Text Tool
+    
+    private func textFontSize() -> CGFloat {
+        max(16, appState.selectedLineWidth * 4)
+    }
+    
     private func toolIcon(for tool: ToolType) -> String {
         switch tool {
-        case .pencil:    return "paintbrush.pointed"
-        case .rectangle: return "square"
-        case .circle:    return "circle"
-        case .select:    return "cursorarrow"
+        case .pencil:      return "paintbrush.pointed"
+        case .rectangle:   return "square"
+        case .circle:      return "circle"
+        case .arrowSingle: return "arrow.right"
+        case .arrowDouble: return "arrow.left.and.right"
+        case .text:        return "textformat"
+        case .select:      return "cursorarrow"
         }
     }
     
@@ -94,24 +103,47 @@ struct DrawingView: View {
         case .pencil:
             // For pencil, draw lines through all collected points
             path.addLines(drawingPath.points)
-            
+            let style = StrokeStyle(lineWidth: drawingPath.lineWidth, lineCap: .round, lineJoin: .round)
+            context.stroke(path, with: .color(drawingPath.color), style: style)
+            return
+
         case .rectangle:
             path.addRect(CGRect(
                 x: min(first.x, last.x), y: min(first.y, last.y),
                 width: abs(first.x - last.x), height: abs(first.y - last.y)
             ))
-            
+
         case .circle:
             path.addEllipse(in: CGRect(
                 x: min(first.x, last.x), y: min(first.y, last.y),
                 width: abs(first.x - last.x), height: abs(first.y - last.y)
             ))
-            
+
+        case .arrowSingle:
+            // Live preview: build arrow path and render it
+            let arrowPath = buildArrowPath(from: first, to: last,
+                                           lineWidth: drawingPath.lineWidth, doubleEnded: false)
+            let shaftStyle = StrokeStyle(lineWidth: drawingPath.lineWidth, lineCap: .round, lineJoin: .round)
+            context.stroke(arrowPath, with: .color(drawingPath.color), style: shaftStyle)
+            context.fill(arrowPath, with: .color(drawingPath.color))
+            return
+
+        case .arrowDouble:
+            let arrowPath = buildArrowPath(from: first, to: last,
+                                           lineWidth: drawingPath.lineWidth, doubleEnded: true)
+            let shaftStyle = StrokeStyle(lineWidth: drawingPath.lineWidth, lineCap: .round, lineJoin: .round)
+            context.stroke(arrowPath, with: .color(drawingPath.color), style: shaftStyle)
+            context.fill(arrowPath, with: .color(drawingPath.color))
+            return
+
+        case .text:
+            return // rendered by the overlay TextField, not the Canvas
+
         case .select:
             return
         }
-        
-        if drawingPath.isFilled && drawingPath.toolType != .pencil {
+
+        if drawingPath.isFilled {
             context.fill(path, with: .color(drawingPath.color))
         } else {
             let style = StrokeStyle(lineWidth: drawingPath.lineWidth, lineCap: .round, lineJoin: .round)
@@ -122,6 +154,34 @@ struct DrawingView: View {
     // MARK: - Input Handling
     
     private func handleDragChanged(_ value: DragGesture.Value) {
+        // --- Text Tool: tap to place ---
+        if appState.selectedTool == .text {
+            // Only capture on the very first event of a new gesture (no currentPath yet)
+            if appState.currentPath == nil {
+                let pt = value.startLocation
+                // Signal AppDelegate to open the real text input panel
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("RequestTextInput"),
+                    object: nil,
+                    userInfo: [
+                        "x": pt.x,
+                        "y": pt.y,
+                        "color": appState.selectedColor,
+                        "fontSize": textFontSize(),
+                        "lineWidth": appState.selectedLineWidth
+                    ]
+                )
+                // Sentinel: prevents re-firing within the same drag gesture
+                appState.currentPath = DrawingPath(
+                    points: [pt],
+                    color: appState.selectedColor,
+                    lineWidth: appState.selectedLineWidth,
+                    toolType: .text
+                )
+            }
+            return
+        }
+        
         // --- Selection Tool ---
         if appState.selectedTool == .select {
             let hit = appState.paths.last(where: { dp in
@@ -130,8 +190,13 @@ struct DrawingView: View {
                     return dp.points.contains(where: { pt in
                         hypot(pt.x - value.location.x, pt.y - value.location.y) < 20
                     })
-                case .rectangle, .circle:
+                case .rectangle, .circle, .arrowSingle, .arrowDouble:
                     return getBoundingRect(for: dp).insetBy(dx: -10, dy: -10).contains(value.location)
+                case .text:
+                    guard let anchor = dp.points.first else { return false }
+                    let hitRect = CGRect(x: anchor.x - 10, y: anchor.y - dp.fontSize,
+                                        width: 300, height: dp.fontSize + 20)
+                    return hitRect.contains(value.location)
                 case .select:
                     return false
                 }
@@ -183,6 +248,11 @@ struct DrawingView: View {
     
     private func handleDragEnded() {
         if appState.selectedTool == .select { return }
+        // Text tool: clear sentinel currentPath; commit happens via the overlay onSubmit
+        if appState.selectedTool == .text {
+            appState.currentPath = nil
+            return
+        }
         lastRecordedPoint = nil
         lastVelocity = 0
         if let currentPath = appState.currentPath {
@@ -278,6 +348,10 @@ class SnapshotNSView: NSView {
             for dp in paths {
                 guard self.buildGeneration == generation else { return } // abort if stale
                 guard dp.id != selectedId else { continue }
+                
+                // Text elements are drawn in a separate pass below
+                if dp.toolType == .text { continue }
+                
                 guard let swiftPath = dp.cachedPath else { continue }
                 
                 let cgPath = swiftPath.cgPath
@@ -286,16 +360,57 @@ class SnapshotNSView: NSView {
                 ctx.setLineCap(.round)
                 ctx.setLineJoin(.round)
                 ctx.setLineWidth(dp.lineWidth)
-                
-                if dp.isFilled && dp.toolType != .pencil {
-                    ctx.setFillColor(nsColor.cgColor)
+                ctx.setStrokeColor(nsColor.cgColor)
+                ctx.setFillColor(nsColor.cgColor)
+
+                switch dp.toolType {
+                case .arrowSingle, .arrowDouble:
+                    // Arrows: stroke the shaft and fill the arrowhead triangles
                     ctx.addPath(cgPath)
-                    ctx.fillPath()
-                } else {
-                    ctx.setStrokeColor(nsColor.cgColor)
+                    ctx.drawPath(using: .fillStroke)
+                case .rectangle, .circle:
+                    if dp.isFilled {
+                        ctx.addPath(cgPath)
+                        ctx.fillPath()
+                    } else {
+                        ctx.addPath(cgPath)
+                        ctx.strokePath()
+                    }
+                default:
                     ctx.addPath(cgPath)
                     ctx.strokePath()
                 }
+                ctx.restoreGState()
+            }
+            
+            // --- Text rendering pass (Core Text — thread-safe, works on background CGContext) ---
+            for dp in paths {
+                guard self.buildGeneration == generation else { return }
+                guard dp.toolType == .text, dp.id != selectedId else { continue }
+                guard let txt = dp.text, let anchor = dp.points.first else { continue }
+                
+                let nsColor = NSColor(dp.color)
+                
+                // Build Core Text attributed string
+                let ctFont = CTFontCreateWithName("Virgil3YOFF" as CFString, dp.fontSize, nil)
+                let cfStr = txt as CFString
+                let cfAttrStr = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
+                CFAttributedStringReplaceString(cfAttrStr, CFRangeMake(0, 0), cfStr)
+                let range = CFRangeMake(0, CFStringGetLength(cfStr))
+                CFAttributedStringSetAttribute(cfAttrStr, range, kCTFontAttributeName, ctFont)
+                CFAttributedStringSetAttribute(cfAttrStr, range, kCTForegroundColorAttributeName, nsColor.cgColor)
+                
+                let line = CTLineCreateWithAttributedString(cfAttrStr)
+                
+                ctx.saveGState()
+                // anchor.y is SwiftUI top-down (same convention as all other path coordinates).
+                // The SnapshotNSView has isFlipped=true and ctx.draw(img,in:) compensates,
+                // so we use anchor.y directly — same as paths do.
+                // textMatrix = scale(1,-1) pre-flips glyphs so they appear right-side-up
+                // after the NSView's display flip. Without it, text renders upside-down.
+                ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+                ctx.textPosition = CGPoint(x: anchor.x, y: anchor.y)
+                CTLineDraw(line, ctx)
                 ctx.restoreGState()
             }
             

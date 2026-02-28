@@ -12,7 +12,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Brush",
-            path: "Sources/Brush"
+            path: "Sources/Brush",
+            resources: [.copy("Resources")]
         )
     ]
 )
